@@ -1,0 +1,195 @@
+name: CI/CD Pipeline
+
+# 全局环境变量 - 使用 Variables（非敏感配置，Secrets 在各子 workflow 中定义）
+env:
+  # 基础构建配置
+  BINARY_NAME: ${{ vars.BINARY_NAME || github.event.repository.name }}
+  BINARY_SOURCE_DIR: ${{ vars.BINARY_SOURCE_DIR || 'deployments' }}
+  # Go 语言环境配置
+  GO_VERSION: ${{ vars.GO_VERSION || '1.25.1' }}
+  GOTESTSUM_VERSION: ${{ vars.GOTESTSUM_VERSION || 'v1.13.0' }}
+  GOPROXY: ${{ vars.GOPROXY || 'https://goproxy.cn,direct' }}
+  GOPRIVATE: ${{ vars.GOPRIVATE || 'github.com/kamalyes' }}
+  # 构建优化配置
+  UPX_COMPRESS: ${{ vars.UPX_COMPRESS || 'false' }}
+
+permissions:
+  contents: read
+  packages: write
+
+on:
+  push:
+    branches:
+      - develop
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '部署环境'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - uat
+          - prod
+        default: dev
+      code-quality:
+        description: '是否进行代码质量检查'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # 准备环境和依赖
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'dev' }}
+    outputs:
+      binary-name: ${{ steps.setup-vars.outputs.binary-name }}
+      binary-source-dir: ${{ steps.setup-vars.outputs.binary-source-dir }}
+      binary-output: ${{ steps.setup-vars.outputs.binary-output }}
+      go-version: ${{ steps.setup-vars.outputs.go-version }}
+      gotestsum-version: ${{ steps.setup-vars.outputs.gotestsum-version }}
+      version: ${{ steps.setup-vars.outputs.version }}
+      build-time: ${{ steps.setup-vars.outputs.build-time }}
+      git-commit: ${{ steps.setup-vars.outputs.git-commit }}
+      upx-compress: ${{ steps.setup-vars.outputs.upx-compress }}
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: 🛠️ Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # - name: 🔑 Configure Git for Private Modules (PAT)
+      #   run: |
+      #     git config --global url."https://${{ secrets.GO_MODULE_PAT }}@github.com".insteadOf "https://github.com"
+
+      - name: 🔑 Setup SSH Key for Private Modules
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GIT_SSH_PRIVATE_KEY }}
+
+      - name: 🔧 Configure Git to use SSH for Private Repos
+        run: |
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - name:  Download Dependencies
+        run: |
+          export GOPROXY="${{ env.GOPROXY }}"
+          export GOPRIVATE="${{ env.GOPRIVATE }}"
+          go mod download
+
+      - name: ⚙️ Setup Variables
+        id: setup-vars
+        run: |
+          # 获取短 commit hash
+          SHORT_COMMIT=$(git rev-parse --short HEAD)
+          
+          # 获取当前分支
+          BRANCH="${{ github.ref_name }}"
+          
+          # 从环境变量或全局变量读取配置（优先使用环境级别的配置）
+          BINARY_NAME="${{ vars.BINARY_NAME || env.BINARY_NAME }}"
+          BINARY_SOURCE_DIR="${{ vars.BINARY_SOURCE_DIR || env.BINARY_SOURCE_DIR }}"
+          GO_VERSION="${{ vars.GO_VERSION || env.GO_VERSION }}"
+          GOTESTSUM_VERSION="${{ vars.GOTESTSUM_VERSION || env.GOTESTSUM_VERSION }}"
+          UPX_COMPRESS="${{ vars.UPX_COMPRESS || env.UPX_COMPRESS }}"
+          
+          # 基本构建信息
+          echo "binary-name=${BINARY_NAME}" >> $GITHUB_OUTPUT
+          echo "binary-source-dir=${BINARY_SOURCE_DIR}" >> $GITHUB_OUTPUT
+          echo "binary-output=${BINARY_SOURCE_DIR}/${BINARY_NAME}" >> $GITHUB_OUTPUT
+          echo "upx-compress=${UPX_COMPRESS}" >> $GITHUB_OUTPUT
+
+          # 版本和构建信息
+          echo "go-version=${GO_VERSION}" >> $GITHUB_OUTPUT
+          echo "gotestsum-version=${GOTESTSUM_VERSION}" >> $GITHUB_OUTPUT
+          
+          # 构建信息（动态生成）
+          echo "version=${BRANCH}-${SHORT_COMMIT}" >> $GITHUB_OUTPUT
+          echo "build-time=$(date -u '+%Y-%m-%d_%H:%M:%S')" >> $GITHUB_OUTPUT
+          echo "git-commit=${SHORT_COMMIT}" >> $GITHUB_OUTPUT
+
+          echo "code-quality=${{ inputs.code-quality }}" >> $GITHUB_OUTPUT
+
+      - name: 📋 Print All Outputs
+        run: |
+          echo "========================================"
+          echo "        Setup Job Outputs Summary       "
+          echo "========================================"
+          echo ""
+          echo "📦 Binary Information:"
+          echo "  - binary-name: ${{ steps.setup-vars.outputs.binary-name }}"
+          echo "  - binary-source-dir: ${{ steps.setup-vars.outputs.binary-source-dir }}"
+          echo "  - binary-output: ${{ steps.setup-vars.outputs.binary-output }}"
+          echo "  - upx-compress: ${{ steps.setup-vars.outputs.upx-compress }}"
+          echo ""
+          echo "🔧 Go Environment:"
+          echo "  - go-version: ${{ steps.setup-vars.outputs.go-version }}"
+          echo "  - gotestsum-version: ${{ steps.setup-vars.outputs.gotestsum-version }}"
+          echo ""
+          echo "🏷️  Build Information:"
+          echo "  - version: ${{ steps.setup-vars.outputs.version }}"
+          echo "  - build-time: ${{ steps.setup-vars.outputs.build-time }}"
+          echo "  - git-commit: ${{ steps.setup-vars.outputs.git-commit }}"
+          echo ""
+          echo "🌐 Service Ports:"
+          echo "  - http-port: ${{ steps.setup-vars.outputs.http-port }}"
+          echo "  - rpc-port: ${{ steps.setup-vars.outputs.rpc-port }}"
+          echo "  - ws-port: ${{ steps.setup-vars.outputs.ws-port }}"
+          echo ""
+
+          echo "🎯 Deployment Strategy:"
+          echo "  - code-quality: ${{ steps.setup-vars.outputs.code-quality }}"
+          echo ""
+          echo "========================================"
+
+  # 第一步：代码质量检查
+  code-quality:
+    name: Code Quality Check
+    needs: setup
+    uses: ./.github/workflows/code-quality.yml
+    with:
+      go-version: ${{ needs.setup.outputs.go-version }}
+      gotestsum-version: ${{ needs.setup.outputs.gotestsum-version }}
+    secrets: inherit
+
+  # 第二步：构建二进制文件（与代码检查并行）
+  build-binary:
+    name: Build Binary
+    needs: setup
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      go-version: ${{ needs.setup.outputs.go-version }}
+      binary-name: ${{ needs.setup.outputs.binary-name }}
+      binary-source-dir: ${{ needs.setup.outputs.binary-source-dir }}
+      binary-output: ${{ needs.setup.outputs.binary-output }}
+      version: ${{ needs.setup.outputs.version }}
+      build-time: ${{ needs.setup.outputs.build-time }}
+      git-commit: ${{ needs.setup.outputs.git-commit }}
+      upx-compress: ${{ needs.setup.outputs.upx-compress }}
+    secrets: inherit
+
+  # 第三步：构建测试服务器（与主程序并行）
+  build-test-server:
+    name: Build Test Server
+    needs: setup
+    uses: ./.github/workflows/build-binary.yml
+    with:
+      go-version: ${{ needs.setup.outputs.go-version }}
+      binary-name: test-server
+      binary-source-dir: ${{ needs.setup.outputs.binary-source-dir }}
+      binary-output: ${{ needs.setup.outputs.binary-source-dir }}/test-server
+      version: ${{ needs.setup.outputs.version }}
+      build-time: ${{ needs.setup.outputs.build-time }}
+      git-commit: ${{ needs.setup.outputs.git-commit }}
+      upx-compress: ${{ needs.setup.outputs.upx-compress }}
+      source-file: testserver/test_server.go
+    secrets: inherit
